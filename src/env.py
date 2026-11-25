@@ -12,6 +12,7 @@ import numpy as np
 
 import config
 from src.geometry import Coord, Layout, get_default_layout
+from src.state import encode
 
 # Action name mappings for logging and rendering
 ACTION_NAMES: dict[int, str] = {
@@ -60,7 +61,7 @@ class RescueEnv:
     def reset(
         self,
         seed: int | None = None,
-    ) -> tuple[tuple[int, int, int, int], dict[str, Any]]:
+    ) -> tuple[tuple[int, ...], dict[str, Any]]:
         """Reset environment to initial state per DESIGN 6."""
         if seed is not None:
             self.rng = np.random.default_rng(seed)
@@ -89,10 +90,9 @@ class RescueEnv:
 
         return self._observe(), self._get_info(death_cause=None)
 
-    def _observe(self) -> tuple[int, int, int, int]:
-        """Return temporary Stage 2-3 observation tuple (row, col, oxygen, carrying_code)."""
-        carrying_code = -1 if self.carrying is None else self.carrying
-        return (self.agent_pos[0], self.agent_pos[1], self.oxygen, carrying_code)
+    def _observe(self) -> tuple[int, ...]:
+        """Return 9-int tabular state tuple encoded per DESIGN 5."""
+        return encode(self)
 
     def _get_info(self, death_cause: str | None = None) -> dict[str, Any]:
         """Construct info dictionary with current step metrics."""
@@ -249,7 +249,7 @@ class RescueEnv:
 
     def step(
         self, action: int
-    ) -> tuple[tuple[int, int, int, int], float, bool, bool, dict[str, Any]]:
+    ) -> tuple[tuple[int, ...], float, bool, bool, dict[str, Any]]:
         """Advance simulation by one action step per DESIGN 6."""
         if action not in ACTION_NAMES:
             raise ValueError(f"Invalid action ID: {action}")
