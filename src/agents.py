@@ -1,11 +1,15 @@
 """Baseline and learning agents for the Rescue-RL environment.
-Stage 5 implements RandomAgent and GreedyAgent per DESIGN.md sections 9.1 and 9.2.
+
+Implements RandomAgent, GreedyAgent, QLearningAgent, and SarsaAgent
+per DESIGN.md section 9.
 """
 
 from __future__ import annotations
 
 import heapq
-from typing import TYPE_CHECKING, Any
+import pickle
+from pathlib import Path
+from typing import TYPE_CHECKING
 import numpy as np
 
 import config
@@ -173,3 +177,121 @@ class GreedyAgent:
                 return retreat_action
 
         return self._fallback_safe_action(env)
+
+
+class _TabularTDLearner:
+    """Shared sparse Q-table, epsilon-greedy policy, and persistence for TD learners."""
+
+    def __init__(
+        self,
+        alpha: float = config.ALPHA,
+        gamma: float = config.GAMMA,
+        eps_start: float = config.EPS_START,
+        eps_end: float = config.EPS_END,
+        eps_decay: float = config.EPS_DECAY,
+        seed: int | None = None,
+    ) -> None:
+        """Initialize tabular learner hyperparameters, Q-table, and RNG."""
+        self.alpha: float = alpha
+        self.gamma: float = gamma
+        self.eps_start: float = eps_start
+        self.eps_end: float = eps_end
+        self.eps_decay: float = eps_decay
+        self.epsilon: float = eps_start
+        self.rng: np.random.Generator = np.random.default_rng(seed)
+        # DESIGN 9.5: sparse dict mapping 9-int state tuples to 6 zero-initialized Q-values
+        self.q_table: dict[tuple[int, ...], np.ndarray] = {}
+
+    def _q_values(self, state: tuple[int, ...]) -> np.ndarray:
+        """Return mutable Q-value vector for state, initializing to 0.0 on first visit."""
+        if state not in self.q_table:
+            self.q_table[state] = np.zeros(len(ALL_ACTIONS), dtype=np.float64)
+        return self.q_table[state]
+
+    def act(
+        self,
+        state: tuple[int, ...],
+        env: RescueEnv | None = None,
+        explore: bool = True,
+    ) -> int:
+        """Choose an action with epsilon-greedy exploration and random tie-breaking."""
+        del env
+        if explore and float(self.rng.random()) < self.epsilon:
+            return int(self.rng.choice(ALL_ACTIONS))
+
+        q_vals = self._q_values(state)
+        best_actions = np.flatnonzero(q_vals == np.max(q_vals))
+        return int(self.rng.choice(best_actions))
+
+    def end_episode(self) -> None:
+        """Apply multiplicative per-episode epsilon decay down to eps_end."""
+        # DESIGN 9.5: epsilon decays multiplicatively each episode with floor EPS_END
+        self.epsilon = max(self.eps_end, self.epsilon * self.eps_decay)
+
+    def save(self, path: str | Path) -> None:
+        """Save sparse Q-table and epsilon state to a pickle file."""
+        out_path = Path(path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "q_table": self.q_table,
+            "epsilon": self.epsilon,
+            "algo": self.__class__.__name__,
+        }
+        with out_path.open("wb") as fh:
+            pickle.dump(payload, fh)
+
+    def load(self, path: str | Path) -> None:
+        """Load sparse Q-table (and optional epsilon) from a pickle file."""
+        in_path = Path(path)
+        with in_path.open("rb") as fh:
+            payload = pickle.load(fh)
+        if isinstance(payload, dict) and "q_table" in payload:
+            self.q_table = payload["q_table"]
+            self.epsilon = float(payload.get("epsilon", self.eps_end))
+        else:
+            self.q_table = payload
+
+
+class QLearningAgent(_TabularTDLearner):
+    """Off-policy tabular Q-learning agent (DESIGN 9.3)."""
+
+    def update(
+        self,
+        state: tuple[int, ...],
+        action: int,
+        reward: float,
+        next_state: tuple[int, ...],
+        next_action: int,
+        terminated: bool,
+    ) -> None:
+        """Update Q(s, a) toward max_a' Q(s', a'), bootstrapping on truncation."""
+        del next_action
+        q_vals = self._q_values(state)
+        # DESIGN 8: terminal transitions have target=reward; truncated still bootstraps
+        if terminated:
+            target = reward
+        else:
+            target = reward + self.gamma * float(np.max(self._q_values(next_state)))
+        q_vals[action] += self.alpha * (target - q_vals[action])
+
+
+class SarsaAgent(_TabularTDLearner):
+    """On-policy tabular SARSA agent (DESIGN 9.4)."""
+
+    def update(
+        self,
+        state: tuple[int, ...],
+        action: int,
+        reward: float,
+        next_state: tuple[int, ...],
+        next_action: int,
+        terminated: bool,
+    ) -> None:
+        """Update Q(s, a) toward Q(s', a') for chosen next_action, bootstrapping on truncation."""
+        q_vals = self._q_values(state)
+        # DESIGN 8 & 9.4: use chosen next_action; bootstrap on truncation, not termination
+        if terminated:
+            target = reward
+        else:
+            target = reward + self.gamma * float(self._q_values(next_state)[next_action])
+        q_vals[action] += self.alpha * (target - q_vals[action])
